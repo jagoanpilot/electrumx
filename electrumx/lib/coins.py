@@ -3943,4 +3943,27 @@ class Raptoreum(Coin):
     DAEMON = daemon.DashDaemon
     DESERIALIZER = lib_tx_dash.DeserializerDash
 
+class Jagoancoin(Coin):
+    NAME = "Jagoancoin"
+    SHORTNAME = "JGC"
+    NET = "mainnet"
+    XPUB_VERBYTES = bytes.fromhex("037bcfc4")
+    XPRV_VERBYTES = bytes.fromhex("037bd049")
+    GENESIS_HASH = ('dbc7fc0bbd75ba59903817def7e2c713'
+    		     'afa66496ef9217da220e2f68f8cfdda1')
+    P2PKH_VERBYTE = bytes.fromhex("41")
+    P2SH_VERBYTES = (bytes.fromhex("69"),)
+    WIF_BYTE = bytes.fromhex("ce")
+    TX_COUNT_HEIGHT = 1
+    TX_COUNT = 1
+    TX_PER_BLOCK = 4
+    RPC_PORT = 17898
+    PEERS = [
+       'asia.jagoancoin.org t',
+       'euroe.jagoancoin.org t'
+    ]
+    SESSIONCLS = DashElectrumX
+    DAEMON = daemon.DashDaemon
+    DESERIALIZER = lib_tx_dash.DeserializerDash
+
 
