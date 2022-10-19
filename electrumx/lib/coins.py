@@ -4073,7 +4073,7 @@ class Jagoancoin(Coin):
     DAEMON = daemon.DashDaemon
     DESERIALIZER = lib_tx_dash.DeserializerDash
 
-     @classmethod
+    @classmethod
     def header_hash(cls, header):
         '''
         Given a header return the hash for Jagoancoin.
