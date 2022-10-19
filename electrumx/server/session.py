@@ -25,10 +25,12 @@ import attr
 import pylru
 from aiorpcx import (Event, JSONRPCAutoDetect, JSONRPCConnection,
                      ReplyAndDisconnect, Request, RPCError, RPCSession,
-                     TaskGroup, handler_invocation, serve_rs, serve_ws, sleep)
+                     handler_invocation, serve_rs, serve_ws, sleep,
+                     NewlineFramer, TaskTimeout, timeout_after, run_in_thread)
 
 import electrumx
 import electrumx.lib.util as util
+from electrumx.lib.util import OldTaskGroup
 from electrumx.lib.hash import (HASHX_LEN, Base58Error, hash_to_hex_str,
                                 hex_str_to_hash, sha256)
 from electrumx.lib.merkle import MerkleCache
@@ -157,7 +159,7 @@ class SessionManager:
         self.estimatefee_cache = pylru.lrucache(1000)
         self.notified_height = None
         self.hsub_results = None
-        self._task_group = TaskGroup()
+        self._task_group = OldTaskGroup()
         self._sslc = None
         # Event triggered when electrumx is listening for incoming requests.
         self.server_listening = Event()
@@ -165,7 +167,8 @@ class SessionManager:
 
         # Set up the RPC request handlers
         cmds = ('add_peer daemon_url disconnect getinfo groups log peers '
-                'query reorg sessions stop'.split())
+                'query reorg sessions stop debug_memusage_list_all_objects '
+                'debug_memusage_get_random_backref_chain'.split())
         LocalRPC.request_handlers = {cmd: getattr(self, 'rpc_' + cmd)
                                      for cmd in cmds}
 
@@ -591,6 +594,39 @@ class SessionManager:
             raise RPCError(BAD_REQUEST, 'still catching up with daemon')
         return f'scheduled a reorg of {count:,d} blocks'
 
+    async def rpc_debug_memusage_list_all_objects(self, limit: int) -> str:
+        """Return a string listing the most common types in memory."""
+        import objgraph  # optional dependency
+        import io
+        with io.StringIO() as fd:
+            objgraph.show_most_common_types(
+                limit=limit,
+                shortnames=False,
+                file=fd)
+            return fd.getvalue()
+
+    async def rpc_debug_memusage_get_random_backref_chain(self, objtype: str) -> str:
+        """Return a dotfile as text containing the backref chain
+        for a randomly selected object of type objtype.
+
+        Warning: very slow! and it blocks the server.
+
+        To convert to image:
+        $ dot -Tps filename.dot -o outfile.ps
+        """
+        import objgraph  # optional dependency
+        import random
+        import io
+        with io.StringIO() as fd:
+            await run_in_thread(
+                lambda:
+                objgraph.show_chain(
+                    objgraph.find_backref_chain(
+                        random.choice(objgraph.by_type(objtype)),
+                        objgraph.is_proper_module),
+                    output=fd))
+            return fd.getvalue()
+
     # --- External Interface
 
     async def serve(self, notifications, event):
@@ -641,7 +677,7 @@ class SessionManager:
         finally:
             # Close servers then sessions
             await self._stop_servers(self.servers.keys())
-            async with TaskGroup() as group:
+            async with OldTaskGroup() as group:
                 for session in list(self.sessions):
                     await group.spawn(session.close(force_after=1))
 
@@ -784,6 +820,9 @@ class SessionManager:
                 del cache[hashX]
 
         for session in self.sessions:
+            if self._task_group.joined:  # this can happen during shutdown
+                self.logger.warning(f"task group already terminated. not notifying sessions.")
+                return
             await self._task_group.spawn(session.notify, touched, height_changed)
 
     def _ip_addr_group_name(self, session) -> Optional[str]:
@@ -877,6 +916,9 @@ class SessionBase(RPCSession):
     async def notify(self, touched, height_changed):
         pass
 
+    def default_framer(self):
+        return NewlineFramer(max_size=self.env.max_recv)
+
     def remote_address_string(self, *, for_log=True):
         '''Returns the peer's IP address and port as a human-readable
         string, respecting anon logs if the output is for a log.'''
@@ -936,7 +978,7 @@ class ElectrumX(SessionBase):
     '''A TCP server that handles incoming Electrum connections.'''
 
     PROTOCOL_MIN = (1, 4)
-    PROTOCOL_MAX = (1, 4, 2)
+    PROTOCOL_MAX = (1, 4, 3)
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -991,7 +1033,8 @@ class ElectrumX(SessionBase):
         return self.session_mgr.extra_cost(self)
 
     def on_disconnect_due_to_excessive_session_cost(self):
-        ip_addr = self.remote_address().host
+        remote_addr = self.remote_address()
+        ip_addr = remote_addr.host if remote_addr else None
         groups = self.session_mgr.sessions[self]
         group_names = [group.name for group in groups]
         self.logger.info(f"closing session over res usage. ip: {ip_addr}. groups: {group_names}")
@@ -1004,6 +1047,17 @@ class ElectrumX(SessionBase):
         return self.hashX_subs.pop(hashX, None)
 
     async def notify(self, touched, height_changed):
+        '''Wrap _notify_inner; websockets raises exceptions for unclear reasons.'''
+        try:
+            async with timeout_after(30):
+                await self._notify_inner(touched, height_changed)
+        except TaskTimeout:
+            self.logger.warning('timeout notifying client, closing...')
+            await self.close(force_after=1.0)
+        except Exception:
+            self.logger.exception('unexpected exception notifying client')
+
+    async def _notify_inner(self, touched, height_changed):
         '''Notify the client about changes to touched addresses (from mempool
         updates or new blocks) and height.
         '''
@@ -1236,7 +1290,10 @@ class ElectrumX(SessionBase):
         proxy_address = self.peer_mgr.proxy_address()
         if not proxy_address:
             return False
-        return self.remote_address().host == proxy_address.host
+        remote_addr = self.remote_address()
+        if not remote_addr:
+            return False
+        return remote_addr.host == proxy_address.host
 
     async def replaced_banner(self, banner):
         network_info = await self.daemon_request('getnetworkinfo')
@@ -1505,6 +1562,8 @@ class ElectrumX(SessionBase):
 class LocalRPC(SessionBase):
     '''A local TCP RPC server session.'''
 
+    processing_timeout = 10**9  # disable timeouts
+
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.client = 'RPC'
@@ -1534,9 +1593,9 @@ class DashElectrumX(ElectrumX):
             'protx.info': self.protx_info,
         })
 
-    async def notify(self, touched, height_changed):
+    async def _notify_inner(self, touched, height_changed):
         '''Notify the client about changes in masternode list.'''
-        await super().notify(touched, height_changed)
+        await super()._notify_inner(touched, height_changed)
         for mn in self.mns.copy():
             status = await self.daemon_request('masternode_list',
                                                ('status', mn))
@@ -1777,3 +1836,51 @@ class AuxPoWElectrumX(ElectrumX):
             height += 1
 
         return headers.hex()
+
+
+class NameIndexElectrumX(ElectrumX):
+    def set_request_handlers(self, ptuple):
+        super().set_request_handlers(ptuple)
+
+        if ptuple >= (1, 4, 3):
+            self.request_handlers['blockchain.name.get_value_proof'] = self.name_get_value_proof
+
+    async def name_get_value_proof(self, scripthash, cp_height=0):
+        history = await self.scripthash_get_history(scripthash)
+
+        trimmed_history = []
+        prev_height = None
+
+        for update in history[::-1]:
+            txid = update['tx_hash']
+            height = update['height']
+
+            if (self.coin.NAME_EXPIRATION is not None
+                    and prev_height is not None
+                    and height < prev_height - self.coin.NAME_EXPIRATION):
+                break
+
+            tx = await(self.transaction_get(txid))
+            update['tx'] = tx
+            del update['tx_hash']
+
+            tx_merkle = await self.transaction_merkle(txid, height)
+            del tx_merkle['block_height']
+            update['tx_merkle'] = tx_merkle
+
+            if height <= cp_height:
+                header = await self.block_header(height, cp_height)
+                update['header'] = header
+
+            trimmed_history.append(update)
+
+            if height <= cp_height:
+                break
+
+            prev_height = height
+
+        return {scripthash: trimmed_history}
+
+
+class NameIndexAuxPoWElectrumX(NameIndexElectrumX, AuxPoWElectrumX):
+    pass
