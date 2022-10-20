@@ -4053,21 +4053,19 @@ class Jagoancoin(Coin):
     NAME = "Jagoancoin"
     SHORTNAME = "JGC"
     NET = "mainnet"
-    XPUB_VERBYTES = bytes.fromhex("037bcfc4")
-    XPRV_VERBYTES = bytes.fromhex("037bd049")
-    GENESIS_HASH = ('dbc7fc0bbd75ba59903817def7e2c713'
-                    'afa66496ef9217da220e2f68f8cfdda1')
-    P2PKH_VERBYTE = bytes.fromhex("41")
-    P2SH_VERBYTES = (bytes.fromhex("69"),)
-    WIF_BYTE = bytes.fromhex("ce")
-    TX_COUNT_HEIGHT = 1
-    TX_COUNT = 1
-    TX_PER_BLOCK = 4
+    XPUB_VERBYTES = bytes.fromhex("03761378")
+    XPRV_VERBYTES = bytes.fromhex("037613fd")
+    GENESIS_HASH = ('e78a0b431e958a4f52af66d780dbf46c'
+                    '569dac677c6984400e7bd3c6b049e5b1')
+    P2PKH_VERBYTE = bytes.fromhex("2b")
+    P2SH_VERBYTES = (bytes.fromhex("66"),)
+    WIF_BYTE = bytes.fromhex("cd")
+    TX_COUNT_HEIGHT = 37961
+    TX_COUNT = 71474
+    TX_PER_BLOCK = 2
     RPC_PORT = 17898
     PEERS = [
-       'seed01.jagoancoin.org t',
-       'api.jagoancoin.org t'
-       'electrumx.jagoancoin.org t'
+       '1electrumx.jagoancoin.org s t'
     ]
     SESSIONCLS = DashElectrumX
     DAEMON = daemon.DashDaemon
